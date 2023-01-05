@@ -1,0 +1,411 @@
+---
+title: "Mediation analysis"
+author: "Berta Franch Martínez"
+date: "12/28/2022"
+output: 
+  pdf_document: 
+    latex_engine: xelatex
+toc: yes
+toc_depth: 3    
+---
+
+```{r libraries, message=FALSE, echo=FALSE, warning=FALSE}
+# Package installation:
+#BiocManager::install("ConsensusClusterPlus", force = T)
+#install.packages("here")
+#install.packages("vtable")
+#install.packages("ggfortify")
+#install.packages("longmixr")
+#install.packages("compareGroups")
+#install.packages("amap")
+#install.packages("lmerTest")
+library(longmixr)
+library(vtable)
+library(ConsensusClusterPlus)
+library(here)
+library(xlsx)
+library(kableExtra)
+library(BiocManager)
+library(ggfortify)
+library(BiocGenerics)
+library(compareGroups)
+library(tidyverse)
+library(dbplyr)
+library(amap)
+library(lme4)
+library(mixlm)
+library(lmerTest) # using lmerTest to obtain p-values
+library(purrr) # to iterate
+library(patchwork) # v. 1.1.1
+library(broom)
+library(cowplot)
+library(ggplot2)
+library(magick)
+library(car)
+#install.packages("DHARMa")
+library(DHARMa)
+library(devtools)
+library(factoextra)
+library(FactoMineR)
+#install.packages("rstatix")
+library(skimr)
+library(janitor)
+library(rstatix)
+library(tibble)
+#devtools::install_github("dgarrimar/manta")
+library(manta)
+#devtools::install_github("vqv/ggbiplot")
+library(ggbiplot)
+library(Biobase)
+library(BiocManager)
+#BiocManager::install("pd.clariom.s.human", force = TRUE)
+library(pd.clariom.s.human)
+library(oligo)
+library(affy)
+library(genefilter)
+library(ggplot2)
+library(ggrepel)
+library(XML)
+library(here)
+library(pheatmap)
+library(stats)
+library(ggplot2)
+library(ggfortify)
+library(dbplyr)
+library(tidyverse)
+library(SummarizedExperiment)
+library(edgeR)
+library(GLDEX)
+library(sva)
+#BiocManager::install("hgu133plus2.db")
+library(hgu133plus2.db)
+library(dplyr)
+#BiocManager::install("EnhancedVolcano")
+library(EnhancedVolcano)
+#BiocManager::install("EDASeq")
+#BiocManager::install("clusterProfiler")
+library(EDASeq)
+library(hgu133plus2.db)
+library(org.Hs.eg.db)
+library(annotate)
+library(biomaRt)
+library(clusterProfiler)
+library(GOstats)
+library(enrichplot)
+library(factoextra)
+library(ggpubr)
+#install.packages("mediation")
+library(mediation)
+
+library(car)
+library(misty)
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(comment = "")
+```
+
+\pagebreak
+
+```{r}
+# load data:
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/transcriptomic_data/eset_blood.rda")
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/Clustering_2/radar_L1_Norm_scaled_adjusted_min_int_center_final.rda")
+
+# load results from radiomic data:
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/Clustering_2/assay_features_clust.rda")
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/Clustering_2/clustering_coldata.rda")
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/Clustering_2/model_data.rda")
+
+# load results from transcriptomic data (voom: fit_sva_fev1)
+load("sva_fev1_voom.rda")
+```
+
+## Mediation analysis:
+
+### Data preparation:
+
+We want a dataset with cinical, radiomic and genetic data:
+
+```{r, eval=TRUE}
+head(model_data)[1:5,1:5]
+# select d_subjid from subjects with radiomic data and set as row names:
+d_subjid <- rdr_L1_final$D_SUBJID[rdr_L1_final$id %in% rownames(model_data)]
+
+rownames(model_data)[1:length(d_subjid)] <- d_subjid
+
+# Compute change in FEV1:
+model_data$FEV1.ch <- model_data$FEV1.t1 - model_data$FEV1.t3
+```
+
+As transcriptomic data, we will just study the genes that we found to be significantly associated with FEV1:
+
+```{r}
+topTab_fev1 <- topTable(fit_sva_fev1, coef = 2)
+mask <- rownames(topTab_fev1)[topTab_fev1$adj.P.Val< 0.05]
+
+# These genes will we the ones used for mediation analysis:
+
+mask
+
+genetic_data <- as.data.frame(exprs(blood_eset))
+genetic_data <- genetic_data[mask,]
+genetic_data <- as.data.frame(t(genetic_data))
+```
+
+Select subject with data in both genetic and radiomic data: 
+
+```{r}
+complete_subj <- which(rownames(model_data) %in% rownames(genetic_data))
+model_data <- model_data[complete_subj,]
+
+complete_subj <- which(rownames(genetic_data) %in% rownames(model_data))
+genetic_data <- genetic_data[complete_subj,]
+head(model_data)[1:5,1:5]
+head(genetic_data)[1:5,1:5]
+
+model_data <- cbind(genetic_data, model_data)
+```
+
+### Step 1: Radiomic -> Clinical
+
+Determine if there is relationship between radiomic clusters and clinical outcome: 
+
+Since we already detected collinearity between clusters 4 and 5, we will look at it carefully and study the VIF factors of the model. Additionally, we will use the squared measure of FEV1.ch because is the one that fits better to a normal distribution 
+```{r}
+# All together:
+model_data$FEV1.CH_sqrt <- sqrt(model_data$FEV1.CH)
+
+mod_all <- lm(FEV1.CH_sqrt ~  AGE + SEX.t1 + 
+                pcaC1 + pcaC2 + pcaC3 + pcaC4 +
+                pcaC5 + pcaC6 , data=model_data)
+summary(mod_all)
+
+car::vif(mod_all)
+
+```
+In this case, the higher VIF value is presented by pcaC4. Thus, this will be the measure removed from analysis:
+```{r}
+
+mod_all <- lm(FEV1.CH_sqrt ~  AGE + SEX.t1 + pcaC1 + pcaC2 + pcaC4 + 
+                + pcaC6 , data=model_data)
+summary(mod_all)
+
+car::vif(mod_all)
+```
+
+
+### Step 2: Radiomic -> Genetic
+
+The purpose of this step will be to determine if exists a relation between radiomic features and genetic expression. If not, we will just accept that radiomic features and genetic expression are two non-related variables which affect the change in FEV1 independently, but if there is indeed relationship between radiomic and genetic data, a mediation analysis will make sense.
+
+Since we have found 8 genes significantly related with the change in FEV1, we will perform an analysis per each. In this case, as we are working with genetic data obtained through RNAseq, 
+
+```{r, warning=FALSE}
+
+lm_fun = function(response) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1", "pcaC2", "pcaC3", "pcaC5",
+                        "pcaC6"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+
+# apply function 
+models_gene = response_vars %>% map(lm_fun)
+
+# show model's summary
+(models_sum = models_gene %>% map(summary)) 
+
+```
+
+```{r, warning=FALSE, eval=FALSE, echo=FALSE}
+mask
+
+# PCA1
+lm_fun1 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene1 = response_vars %>% map(lm_fun1)
+# show model's summary
+(models_sum1 = models_gene1 %>% map(summary)) 
+
+
+# PCA2
+lm_fun2 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene2 = response_vars %>% map(lm_fun2)
+# show model's summary
+(models_sum2 = models_gene2 %>% map(summary)) 
+
+
+# PCA3
+lm_fun3 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene3 = response_vars %>% map(lm_fun3)
+# show model's summary
+(models_sum3 = models_gene3 %>% map(summary)) 
+
+
+
+# PCA4
+lm_fun4 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene4 = response_vars %>% map(lm_fun4)
+# show model's summary
+(models_sum4 = models_gene4 %>% map(summary)) 
+
+
+
+# PCA5
+lm_fun5 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene5 = response_vars %>% map(lm_fun5)
+# show model's summary
+(models_sum5 = models_gene5 %>% map(summary)) 
+
+
+# PCA6
+lm_fun6 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene6 = response_vars %>% map(lm_fun6)
+# show model's summary
+(models_sum6 = models_gene6 %>% map(summary)) 
+
+
+# PCA7
+lm_fun7 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene7 = response_vars %>% map(lm_fun7)
+# show model's summary
+(models_sum7 = models_gene7 %>% map(summary)) 
+
+
+# PCA1
+lm_fun8 = function(response, cluster) {
+  form = reformulate(c("AGE", "SEX.t1", "pcaC1"), 
+                     response = response)
+  lm(form, data = model_data)
+}
+
+# select variables
+response_vars <- mask %>% purrr::set_names()
+# apply function 
+models_gene8 = response_vars %>% map(lm_fun8)
+# show model's summary
+(models_sum8 = models_gene8 %>% map(summary)) 
+```
+
+### Step 3: Radiomic + Genetic -> Clinical
+
+We have found 2 clusters signifcantly related with two genes, we will just use these terms for the following step: 
+
+Cluster 3 and 4 (nearly) significantly related with FEV1. 
+Cluster 4 and 5 significantly related with 222352_at
+
+```{r}
+# change name of gene to avoid problems
+
+model_data$gene <- model_data$`216559_x_at`
+
+model.Y <- lm(FEV1.CH_sqrt ~ + AGE + SEX.t1 + pcaC1 + pcaC2 + pcaC3 + 
+                pcaC5 + pcaC6 + gene,
+              data = model_data)
+summary(model.Y)
+```
+
+Once the genetic effect is added to the model, the significance of the effect of radiomic clusters increases. In order to confirm mediation effect it should decrease. Thus, any mediation effect can be proved. 
+
+
+```{r, echo=FALSE, eval=FALSE}
+feat_clust <- assay_features[,c(ncol(assay_features), (ncol(assay_features)-1))]
+
+# unify ID from radiomic features and genetic data 
+head(assay_features)
+head(rdr_L1_final$D_SUBJID)
+head(colData(rdr_L1_final)$id) 
+head(colnames(assay_features)) 
+str(assay_features)
+# remove X to match names of both datasets:
+colnames(assay_features)  <-  sub("X", "", colnames(assay_features))
+
+# select d_subjid from subjects with radiomic data and set as column names:
+d_subjid <- rdr_L1_final$D_SUBJID[rdr_L1_final$id %in% 
+                                                     colnames(assay_features)]
+names(assay_features)[1:length(d_subjid)] <- d_subjid
+
+# Select subjects with dataset in both blood and radiomic data:
+shared <- which(sampleNames(blood_eset) %in% colnames(assay_features))
+assay_features <- assay_features[,c(shared, 1774:1775)]
+
+# Create one dataset for each cluster except for 2, since it did not appear to 
+# be significantly related with FEV1. We also delete cluster and name feature columns:
+
+cluster1 <- as.data.frame(t(assay_features[assay_features$cluster == 1,
+                           c(1:(ncol(assay_features)-2))]))
+cluster3 <- t(assay_features[assay_features$cluster == 3,
+                           c(1:(ncol(assay_features)-2))])
+cluster4 <- t(assay_features[assay_features$cluster == 4,
+                           c(1:(ncol(assay_features)-2))])
+cluster5 <- t(assay_features[assay_features$cluster == 5,
+                           c(1:(ncol(assay_features)-2))])
+cluster6 <- t(assay_features[assay_features$cluster == 6,
+                           c(1:(ncol(assay_features)-2))])
+cluster7 <- t(assay_features[assay_features$cluster == 7,
+                           c(1:(ncol(assay_features)-2))])
+cluster8 <- t(assay_features[assay_features$cluster == 8,
+                           c(1:(ncol(assay_features)-2))])
+```
+

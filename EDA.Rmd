@@ -1,0 +1,363 @@
+---
+title: "Exploratory Data Analysis"
+author: "Berta Franch Martínez"
+date: "12/31/2022"
+output: 
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(comment = "")
+```
+
+```{r}
+#install.packages("DataExplorer")
+library(DataExplorer)
+#install.packages("dlookr")
+library(dlookr)
+library(longmixr)
+library(vtable)
+library(ConsensusClusterPlus)
+library(here)
+library(xlsx)
+library(kableExtra)
+library(BiocManager)
+library(ggfortify)
+library(BiocGenerics)
+library(compareGroups)
+library(tidyverse)
+library(dbplyr)
+library(amap)
+library(lme4)
+library(mixlm)
+library(lmerTest) # using lmerTest to obtain p-values
+library(purrr) # to iterate
+library(patchwork) # v. 1.1.1
+library(broom)
+library(cowplot)
+library(ggplot2)
+library(magick)
+library(car)
+#install.packages("DHARMa")
+library(DHARMa)
+library(devtools)
+library(factoextra)
+library(FactoMineR)
+#install.packages("rstatix")
+library(skimr)
+library(janitor)
+library(rstatix)
+library(tibble)
+#devtools::install_github("dgarrimar/manta")
+library(manta)
+#devtools::install_github("vqv/ggbiplot")
+library(ggbiplot)
+```
+
+```{r}
+# Load data
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/transcriptomic_data/eset_blood.rda")
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/transcriptomic_data/eset_sputum.rda")
+load("/Users/bertafranchmartinez/Desktop/Màster uoc/TFM/Clustering_2/radar_L1_Norm_scaled_adjusted_min_int_center_final.rda")
+load("pca1_results.rda")
+```
+
+## Radiomic data:
+
+```{r}
+rownames(rdr_L1_final) <-  sub(".original", "", rownames(rdr_L1_final))
+features_adj <- data.frame(t(assay(rdr_L1_final, "adjusted_min_int_center")))
+```
+
+## Clinical data:
+
+```{r}
+colData <- data.frame(colData(rdr_L1_final))
+# select variables of interest (categorical and numerical) from ColData:
+interest_vars_cat <- c("SEX.t1", "SMOKER",  
+                   "CBRONCH",  #Chronic bronchitis phenotype flag
+                   "EMPH.t1", "EMPH.t3", # 	Individual has emphysema
+                   "RACE1.t1", "GOLDCD")
+
+interest_vars_num <- c("AGE", "BMI.t1", "BMI.t3",
+                        "SUPKYR", #Number of pack years smoked 
+                        "FEV1.t1", "FEV1.t3", # Forced expiratory volume (1 second) (L)
+                        "FEV1PSDS.t1", "FEV1PSDS.t3", #Post-dose FEV1 (L)
+                       "FEV1PSPC.t1", "FEV1PSPC.t3",
+                       "FEV1REV.t1", "FEV1REV.t3", 
+                       "FEVVCPD.t1", "FEVVCPD.t3",
+                       "FVCPSPC.t1", "FVCPSPC.t3", 
+                        "FRC", #	Functional residual capacity (L)
+                        "IC") # inspiratory capacity
+interest_char <- c("D_SUBJID", "CENTREID", "mask_id")
+# select and store as factor or numeric variables:
+colData <- colData %>% select(c(interest_vars_cat, interest_vars_num,
+                                interest_char)) %>% 
+  mutate_at(interest_vars_cat, as.factor) %>% 
+  mutate_at(interest_vars_num, as.numeric)
+
+colData$FEV1.CH <- colData$FEV1.t1 - colData$FEV1.t3
+colData$FEV1PSDS.CH <- colData$FEV1PSDS.t1 - colData$FEV1PSDS.t3
+colData$FEV1PSPC.CH <- colData$FEV1PSPC.t1 - colData$FEV1PSPC.t3
+colData$FEV1REV.CH <- colData$FEV1REV.t1 - colData$FEV1REV.t3
+colData$FEVVCPD.CH <- colData$FEVVCPD.t1 - colData$FEVVCPD.t3
+colData$FVCPSPC.CH <- colData$FVCPSPC.t1 - colData$FVCPSPC.t3
+
+# select d_subjid from subjects with radiomic data and set as row names:
+d_subjid <- rdr_L1_final$D_SUBJID[rdr_L1_final$id %in% rownames(colData)]
+
+colData$c_subjid <- d_subjid
+colData$r_subijd <- rownames(colData)
+```
+
+
+## Transcriptomic data:
+
+```{r}
+blood <- as.data.frame(exprs(blood_eset))
+sputum <- as.data.frame(exprs(sputum_eset))
+```
+
+
+# Exploratory Analysis:
+
+## Missing data:
+
+Quickly visualize the structure of all dataframes:
+```{r}
+data_list <- list(features_adj, colData, blood, sputum)
+plot_str(data_list)
+```
+
+Describe structure of variables in data, as well as missing values. The quality of radiomic data was completely acceptable, as well as the genetic expression assay of sputum samples (both presented high rate of completed rows and low percentage of missing values). Regarding to phenotipical data (colData), only the 20% of rows were completed and the 16.3% of observations were missing values). Something similar happened with blood expression assay, in which just the 40.3% of rows were completed, and the 30% of total observations were missing. Thus, the missing profile of the variables in these two datasets were explored more deeply. 
+Note: Although transcriptomic data should be integer, it is continuous due to the normalization process used.  
+
+```{r}
+library(ggpubr)
+p1 <- plot_intro(features_adj)
+p2 <- plot_intro(colData)
+p3 <- plot_intro(blood)
+p4 <- plot_intro(sputum)
+
+pdf("descriptive.pdf", height = 7, width = 13)
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2, common.legend = TRUE,
+          labels = c("A", "B", "C", "D"))
+dev.off()
+head(features_adj)
+
+```
+
+Explore missing profile of all data:
+```{r}
+missing_p <- plot_missing(colData)
+missing_b <- plot_missing(blood)
+pdf("missing_profile.pdf", height = 5, width = 7)
+ggarrange(missing_p, missing_b, ncol = 2, nrow =1, legend = "bottom", 
+          common.legend = TRUE)
+dev.off()
+
+pdf("missing_profile2.pdf", height = 12, width = 10)
+plot_missing(colData)
+plot_missing(blood)
+dev.off()
+```
+In blood dataset, data from approximately 15000 genes was missing. This represented approximately the 30% of the total genes, so data quality was still acceptable. Regarding to phenotypical data, it could be clearly seen that the number of missing rows increased in data collected during the second period of time (t3) while data with less missing rate was the one collected during first period of time (as expected). Even though, the missing rate for variables from second period was approximately 24% and data was accepted and used. Moreover, two variables presented a high missing rate (73.43%): Inspiratory Capacity (IC) and Functional Residual Capacity (FRC). After removing these two variables, the percentage of complete rows increased to 66.8%. 
+
+```{r}
+colData <- drop_columns(colData, c("IC", "FRC"))
+plot_intro(colData)
+```
+
+## Univariate analysis
+
+```{r}
+#General statistics
+describe_general <- describe(colData)
+describe_general
+write.xlsx(describe_general, file = "descriptive_general.xlsx")
+# Sort by skewness (left to right)
+
+#skewnsee_original <- colData %>%
+#  describe() %>%
+#  select(described_variables, skewness, mean, p25, p50, p75) %>% 
+#  filter(!is.na(skewness)) %>% 
+#  arrange(desc(abs(skewness)))
+
+# Normality:
+# For variables in which the transformation improved normality diagnosis,
+# the corresponding transformation was applied:
+
+#plot_normality(colData)[1:3]
+
+pdf("histogram_distributions.pdf")
+plot_histogram(colData, ncol = 5L, nrow = 5L)
+dev.off()
+# Transformation of variables which will be set as outcomes, in order to 
+# follow the more normal distribution the better
+sqrt_tf <- c("FEV1PSDS.t1", "FEV1PSDS.t3", "FEV1REV.t1",
+             "FEV1REV.t3", "FEVVCPD.t1", "FEVVCPD.t3", 
+             "FEV1.CH", "FEV1PSDS.CH", "FEV1PSPC.CH", "FVCPSPC.CH")
+log_tf <- c("FEV1.t1", "FEV1.t3")
+
+colData_trans <- update_columns(colData, sqrt_tf, function(x) sqrt(x))
+colData_trans <- update_columns(colData_trans, log_tf, function(x) log(x))
+```
+
+### Distributions:
+
+We will focus on phenotipical data. Genetic and radiomic data will be deeply explored in future sections.
+
+```{r}
+# Bar plots for categorical variables
+pdf("bar_plot.pdf")
+plot_bar(colData_trans)
+dev.off()
+pdf("hist_plot.pdf")
+# Histogram for continuos variables
+plot_histogram(colData_trans, ncol = 5L, nrow = 5L)
+dev.off()
+```
+Just few subjects do not present emphysema and are not white. These categories will not be considered since there is not representation of all categories. 
+
+### Normality
+
+Since we will be applying regression models, the normality of data should be tested
+
+```{r}
+
+qq_data <- colData_trans[, c(interest_vars_num[1:16], "FEV1.CH", "FEV1PSDS.CH",
+                       "FEV1PSPC.CH", "FEV1REV.CH", "FEVVCPD.CH",
+                       "FVCPSPC.CH")]
+
+pdf("log.pdf")
+plot_qq(qq_data, ncol =  5L, nrow = 5L) # skewness improved
+
+dev.off()
+pdf("log_non_trans.pdf")
+plot_qq(colData[, c(interest_vars_num[1:16], "FEV1.CH", "FEV1PSDS.CH",
+                       "FEV1PSPC.CH", "FEV1REV.CH", "FEVVCPD.CH",
+                       "FVCPSPC.CH")], ncol = 5L, nrow = 5L)
+dev.off()
+```
+
+Although some variables of interest presented a slightly positive skewed distribution (such as FEV1 and change in FEV1 or FEV1PSDS) this skewness was partially corrected using sqrt or log transformation. We accepted this data as normal distributed and it was used for the following analysis. 
+
+```{r}
+#colData <- colData_trans
+```
+
+### PCA Analysis
+
+```{r}
+
+pca_df <- colData
+pc_comp <- plot_prcomp(na.omit(colData), nrow = 1L, ncol = 5L, variance_cap = 0.9)
+pc_comp$page_1
+pdf("pca_pheno.pdf")
+pc_comp$page_1
+dev.off()
+pdf("pca_pheno2.pdf")
+pc_comp$page_2
+dev.off()
+```
+
+
+## Bivariate analysis 
+
+### Correlation plot
+
+There are some variables which we already expect to be correlated, such as the same variables from different period of time, or the distinct FEV1 related measures, since all of them are extracted from FEV1 raw measure. In the same way, as GOLD stages are established based on FEV1 measure, we expected them to be also correlated with FEV1 related measures.  
+```{r}
+pdf("correlation_plot.pdf")
+plot_correlation(na.omit(colData), maxcat = 4L)
+dev.off()
+```
+
+Despite these expected correlations, some other relationship (less intense) could be identified such as the negative relationship between BMI and the change in FEV1 measures or the slightly positive relationship between white race category and FEV1 measures. Sex shows also correlation with some clinical measures. For example, being male appears to have positive relation with FEV1 measures while being woman shows negative relationship. 
+
+let's make correlation plot without the expected correaltions:
+
+```{r}
+corr_data <- drop_columns(colData, c("FEV1.t1","FEV1.t3","FEV1PSDS.t1","FEV1PSDS.t3",
+             "FEV1PSPC.t1", "FEV1PSPC.t3", "FEV1REV.t1","FEV1REV.t3",
+             "FEVVCPD.t1",  "FEVVCPD.t3",  "FVCPSPC.t1",  "FVCPSPC.t3", "BMI.t3"))
+corr_data %>% correlate() %>% plot
+
+pdf("cetogry_corrplot.pdf")
+corr_data %>%
+  group_by(SEX.t1) %>%
+  correlate() %>%
+  plot()
+
+corr_data %>%
+  group_by(GOLDCD) %>%
+  correlate() %>%
+  plot()
+
+corr_data %>%
+  group_by(CBRONCH) %>%
+  correlate() %>%
+  plot()
+dev.off()
+```
+
+Definition of target variable:
+```{r}
+
+target_variables <- c("FEV1.CH","FEV1PSDS.CH", "FEV1PSPC.CH", "FEV1REV.CH", 
+                    "FEVVCPD.CH",  "FVCPSPC.CH")
+
+cat_interest <- c("SEX.t1", "SMOKER", "CBRONCH", "GOLDCD")
+
+rownames(colData) <- colData$r_subijd
+colData_radiomic <- cbind(colData, features_adj)
+
+# Select variables we want to relate with change in clinical measures
+pdf("boxplot_interest.pdf")
+for (i in 1:length(cat_interest)) {
+  cat = cat_interest[i]
+  data <- colData[, c(cat, names(colData)[12:29])]
+  plot_boxplot(na.omit(data), by = cat,  ncol = 6L, nrow = 3L)
+}
+dev.off()
+
+num_interest <-names(colData)[8:10]
+pdf("scatterplot_interest.pdf")
+for (i in 1:length(num_interest)) {
+  num = num_interest[i]
+  data <- colData[, c(num, names(colData)[12:29])]
+  plot_scatterplot(na.omit(data), by = num, sampled_rows = 1000L,  ncol = 6L, nrow = 3L)
+}
+dev.off()
+```
+
+```{r}
+# Radiomic features correlation plot:
+pdf("correlation_radiomic.pdf", height = 15, width = 15)
+plot_correlation(features_adj,  ggtheme = theme_gray(),
+  theme_config = list(legend.position = "bottom", axis.text.x = element_text(angle =
+    90)))
+dev.off()
+``` 
+
+### Genetic data
+
+```{r}
+plot_histogram(blood, ncol = 5L, nrow = 5L)
+plot_histogram(sputum, ncol = 5L, nrow = 5L)
+dev.off()
+```
+### Create report
+
+```{r, eval=FALSE}
+#create_report(colData)
+```
+
+```{r}
+colData_raw <- colData
+# save colData with some variables transformed
+save(colData_raw, file = "colData_def.rda")
+save(colData_trans, file ="colData_trans.rda")
+```
